@@ -1,6 +1,13 @@
 package com.jimmy
 
 import com.sun.management.ThreadMXBean
+import com.typesafe.config.ConfigFactory
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.hocon.Hocon
+import kotlinx.serialization.hocon.decodeFromConfig
 import org.jetbrains.kotlinx.dataframe.DataFrame
 import org.jetbrains.kotlinx.dataframe.api.*
 import org.jetbrains.kotlinx.dataframe.io.readCsv
@@ -24,106 +31,143 @@ import kotlin.time.Clock
 fun main(args: Array<String>) {
     val config = extractConfig(args)
 
-    when {
-        config.plot -> {
-            val cSVs = File("benchmarks").listFiles {
-                it.extension == "csv"
-            } ?: emptyArray()
+    if (config.test) test(config)
 
-            val df = cSVs.map { DataFrame.readCsv(it).convertTo<BenchmarkResult>() }.concat()
+    if (config.plot) {
+        val cSVs = File(config.path).listFiles {
+            it.extension == "csv"
+        } ?: emptyArray()
 
-            makePlot(config, df)
+        val df = cSVs.map { DataFrame.readCsv(it).convertTo<BenchmarkResult>() }.concat()
+
+        makePlot(config, df)
+    }
+
+    if (!config.test && !config.plot) {
+        val n = config.difficulty?.firstOrNull() ?: 0
+
+        require(n <= 64) {
+            "n must be less than or equal to 64 but provided value is $n"
         }
 
-        config.test -> test(config)
+        val generator = GridGenerator(Clock.System.now().epochSeconds)
+        val generatedGrid: SudokuGrid?
+        var removed = 0
 
-        else -> {
-            val n = config.difficulty?.firstOrNull() ?: 0
-
-            require(n <= 64) {
-                "n must be less than or equal to 64 but provided value is $n"
+        val time = measureTimeMillis {
+            generatedGrid = generator.generateRandom(V1SudokuGridBase())?.also {
+                removed = it.playable(n)
             }
+        }
 
-            val generator = GridGenerator(Clock.System.now().epochSeconds)
-            val generatedGrid: SudokuGrid?
+        if (removed < n) println("Failed to remove ${n - removed} cells for d$n")
 
-            val time = measureTimeMillis {
-                generatedGrid = generator.generateRandom(V1SudokuGridBase())?.also { it.playable(n) }
-            }
+        if (config.printTime) println("Time taken: $time milliseconds")
 
-            if (config.printTime) println("Time taken: $time milliseconds")
+        generatedGrid?.let {
+            if (config.printNice) it.printNiceGrid()
+            else it.print()
 
-            generatedGrid?.let {
-                if (config.printNice) it.printNiceGrid()
-                else it.print()
-
-                if (config.printDebug) println(it.debugString())
-            }
+            if (config.printDebug) println(it.debugString())
         }
     }
 }
 
 fun test(config: Config) {
     val seed = Clock.System.now().epochSeconds
-    val generator = GridGenerator(seed)
+
     val versions = listOf(
-        V1SudokuGridBase(),
-        V2SudokuGridPacked(),
-        V3SudokuGridFilteredSelection(),
-        V4SudokuGridCaching(),
-        V5SudokuGridLimitedSolutions(),
-        V6SudokuGridBetterRandomSelection(),
+        ::V1SudokuGridBase,
+        ::V2SudokuGridPacked,
+        ::V3SudokuGridFilteredSelection,
+        ::V4SudokuGridCaching,
+        ::V5SudokuGridLimitedSolutions,
+        ::V6SudokuGridBetterRandomSelection,
     ).filter {
-        config.version == null || it.v in config.version
+        config.version == null || it().v in config.version
     }
 
     val difficulties = config.difficulty ?: (1..64).toSet()
+
+    val threadCount = Runtime.getRuntime().availableProcessors()
+    val dispatcher = Dispatchers.Default.limitedParallelism(threadCount)
 
     ProgressPrinter.doPrint(config.printProgress)
     ProgressPrinter["Iteration"] = ProgressPrinter.Progress(config.iterations)
     ProgressPrinter["Difficulty"] = ProgressPrinter.Progress(difficulties.size)
     ProgressPrinter["Version"] = ProgressPrinter.Progress(versions.size)
 
-    for (version in versions) {
-        val results = mutableListOf<BenchmarkResult>()
+    runBlocking {
+        for (versionFactory in versions) {
+            val results = mutableListOf<BenchmarkResult>()
+            val versionNumber = versionFactory().v
 
-        ProgressPrinter.print()
-        ProgressPrinter["Difficulty"]?.reset()
-
-        var generatedGrid: SudokuGrid? = null
-        for (difficulty in difficulties.sorted()) {
             ProgressPrinter.print()
-            ProgressPrinter["Iteration"]?.reset()
+            ProgressPrinter["Difficulty"]?.reset()
 
-            repeat(config.iterations) { i ->
+            for (difficulty in difficulties.sorted()) {
                 ProgressPrinter.print()
+                ProgressPrinter["Iteration"]?.reset()
 
-                version.setSeed(seed + i)
-                var removed = 0
-                val (time, peakMemoryBytes) = measureMemoryAndTime {
-                    generatedGrid = generator.generateRandom(version,config.grid)?.also {
-                        removed = it.playable(difficulty)
-                    } ?: throw IllegalStateException("Failed to generate grid")
+                val tasks = (0 until config.iterations).map { i ->
+                    async(dispatcher) {
+                        val version = versionFactory()
+                        val generator = GridGenerator(seed)
+
+                        version.setSeed(seed + i)
+
+                        var generatedGrid: SudokuGrid? = null
+                        var removed = 0
+
+                        val (time, peakMemoryBytes) = measureMemoryAndTime {
+                            generatedGrid = generator.generateRandom(
+                                version,
+                                config.grid
+                            )?.also {
+                                removed = it.playable(difficulty)
+                            } ?: throw IllegalStateException(
+                                "Failed to generate grid"
+                            )
+                        }
+
+                        if (removed < difficulty) {
+                            println("Failed to remove ${difficulty - removed} cells for v${version.v} d$difficulty")
+                        }
+
+                        val gridString = generatedGrid!!.debugString()
+
+                        val result = BenchmarkResult(
+                            version.v,
+                            gridString,
+                            difficulty,
+                            gridString.count { it == '.' },
+                            time.toFloat(),
+                            peakMemoryBytes
+                        )
+
+                        version.reset()
+
+                        result
+                    }
                 }
-                if(removed < difficulty) println("Failed to remove ${difficulty - removed} cells for v${version.v} d${difficulty}")
 
-                generatedGrid?.let {
-                    val gridString = it.debugString()
-                    results.add(BenchmarkResult(version.v, gridString, difficulty, gridString.count { c -> c == '.' }, time / 1_000_000f, peakMemoryBytes))
+                tasks.forEach { task ->
+                    results.add(task.await())
+                    ProgressPrinter["Iteration"]?.update()
                 }
 
-                version.reset()
-                ProgressPrinter["Iteration"]?.update()
+                ProgressPrinter["Difficulty"]?.update()
             }
 
-            ProgressPrinter["Difficulty"]?.update()
-        }
+            ProgressPrinter["Version"]?.update()
 
-        ProgressPrinter["Version"]?.update()
+            Path("${config.path}/benchmark_results_v$versionNumber.csv").let { path ->
+                if (!path.exists()) {
+                    path.createParentDirectories().createFile()
+                }
 
-        Path("benchmarks/benchmark_results_v${version.v}.csv").let { path ->
-            if (!path.exists()) path.createParentDirectories().createFile()
-            results.toDataFrame().writeCsv(path)
+                results.toDataFrame().writeCsv(path)
+            }
         }
     }
 
@@ -170,8 +214,8 @@ fun makePlot(config: Config, df: DataFrame<BenchmarkResult>) {
         }
     }
 
-    val runtimePath = runtimePlot.save("runtime.svg", 2.0, 300, "plots")
-    val memPath = memoryPlot.save("memory.svg", 2.0, 300, "plots")
+    val runtimePath = runtimePlot.save("runtime.svg", 2.0, 300, config.plotPath)
+    val memPath = memoryPlot.save("memory.svg", 2.0, 300, config.plotPath)
 
     println("Runtime Benchmark plot saved to: $runtimePath")
     println("Memory Benchmark plot saved to: $memPath")
@@ -199,7 +243,7 @@ fun measureMemoryAndTime(block: () -> Unit): Pair<Long, Long> {
 fun extractArgs(args: Array<String>): Map<String, String> {
     val map = mutableMapOf<String, String>()
     val flags = setOf("test", "plot", "p", "t", "b", "d")
-    val options = setOf("v", "difficulty", "i", "start", "end", "n", "grid")
+    val options = setOf("v", "version", "difficulty", "i", "iterations", "start", "end", "n", "grid", "path", "plotPath", "c", "config")
     var i = 0
 
     while (i < args.size) {
@@ -207,16 +251,44 @@ fun extractArgs(args: Array<String>): Map<String, String> {
             in flags -> map[arg] = "true"
             in options -> {
                 require(i < args.size) {
-                    "Missing value for argument: $arg"
+                    "Missing value for argument: -$arg"
                 }
                 map[arg] = args[i++]
             }
 
-            else -> throw IllegalArgumentException("Unknown argument: $arg")
+            else -> throw IllegalArgumentException("Unknown argument: -$arg")
         }
     }
 
     return map
+}
+
+@OptIn(ExperimentalSerializationApi::class)
+fun loadConfigFile(path: String): Config {
+    val file = File(path)
+    require(file.exists()) { "Config file does not exist: $path" }
+    require(file.isFile) { "Config path is not a file: $path" }
+
+    var typesafeConfig = ConfigFactory.parseFile(file).resolve()
+    val aliasMappings = mapOf(
+        "v" to "version",
+        "i" to "iterations",
+        "p" to "printProgress",
+        "progress" to "printProgress",
+        "t" to "printTime",
+        "time" to "printTime",
+        "b" to "printNice",
+        "board" to "printNice",
+        "nice" to "printNice",
+        "d" to "printDebug",
+        "debug" to "printDebug"
+    )
+    for ((alias, canonical) in aliasMappings) {
+        if (typesafeConfig.hasPath(alias) && !typesafeConfig.hasPath(canonical)) {
+            typesafeConfig = typesafeConfig.withValue(canonical, typesafeConfig.getValue(alias))
+        }
+    }
+    return Hocon.decodeFromConfig(typesafeConfig)
 }
 
 fun parseIntSelection(value: String): Set<Int> {
@@ -242,19 +314,28 @@ fun parseIntSelection(value: String): Set<Int> {
 }
 
 fun extractConfig(args: Array<String>): Config {
-    val argsMap = extractArgs(args)
+    val cliMap = extractArgs(args)
+    val configFilePath = cliMap["c"] ?: cliMap["config"]
 
-    return Config(
-        test = "test" in argsMap,
-        plot = "plot" in argsMap,
-        version = argsMap["v"]?.let(::parseIntSelection),
-        difficulty = argsMap["difficulty"]?.let(::parseIntSelection),
-        iterations = argsMap["i"]?.toIntOrNull() ?: 100,
-        grid = argsMap["grid"],
-        printProgress = "p" in argsMap,
-        printTime = "t" in argsMap,
-        printNice = "b" in argsMap,
-        printDebug = "d" in argsMap
+    val baseConfig = if (configFilePath != null) {
+        loadConfigFile(configFilePath)
+    } else {
+        Config()
+    }
+
+    return baseConfig.copy(
+        test = "test" in cliMap || baseConfig.test,
+        plot = "plot" in cliMap || baseConfig.plot,
+        version = (cliMap["v"] ?: cliMap["version"])?.let(::parseIntSelection) ?: baseConfig.version,
+        difficulty = cliMap["difficulty"]?.let(::parseIntSelection) ?: baseConfig.difficulty,
+        iterations = (cliMap["i"] ?: cliMap["iterations"])?.toIntOrNull() ?: baseConfig.iterations,
+        grid = cliMap["grid"] ?: baseConfig.grid,
+        printProgress = "p" in cliMap || "printProgress" in cliMap || "progress" in cliMap || baseConfig.printProgress,
+        printTime = "t" in cliMap || "printTime" in cliMap || "time" in cliMap || baseConfig.printTime,
+        printNice = "b" in cliMap || "printNice" in cliMap || "board" in cliMap || "nice" in cliMap || baseConfig.printNice,
+        printDebug = "d" in cliMap || "printDebug" in cliMap || "debug" in cliMap || baseConfig.printDebug,
+        path = cliMap["path"] ?: baseConfig.path,
+        plotPath = cliMap["plotPath"] ?: baseConfig.plotPath,
     )
 }
 
