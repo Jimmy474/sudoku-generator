@@ -309,32 +309,43 @@ open class V5SudokuGridLimitedSolutions : V4SudokuGridCaching() {
 open class V6SudokuGridBetterRandomSelection : V5SudokuGridLimitedSolutions() {
     override val v: Int = 6
 
-    val randomOptions = (0..80).shuffled(random).toMutableList()
+    var ri = 0
+    var randomOptions = (0..80).shuffled(random)
 
     override fun markUsed(row: Int, col: Int) {}
 
     override fun setSeed(seed: Long) {
         super.setSeed(seed)
-        randomOptions.clear()
-        randomOptions.addAll((0..80).shuffled(random))
+        ri = 0
+        randomOptions = randomOptions.shuffled(random)
     }
 
     override fun reset(){
         super.reset()
-        randomOptions.clear()
-        randomOptions.addAll((0..80).shuffled(random))
+        ri = 0
+        randomOptions = randomOptions.shuffled(random)
     }
 
     override fun getRandomFilled(attempts: Int): Triple<Int, Int, Int>? {
-        while (randomOptions.isNotEmpty()) {
-            val index = randomOptions.removeFirst()
-            val row = index / 9
-            val col = index % 9
+        val index = randomOptions[ri++]
+        val row = index / 9
+        val col = index % 9
 
-            val value = get(row, col)
-            if (value != 0) return Triple(row, col, value)
+        return Triple(row, col, get(row, col))
+    }
+
+    override fun playable(n: Int): Int {
+        var removed = 0
+        while (removed < n && ri < randomOptions.size) {
+            val (row, col, value) = getRandomFilled(0) ?: break
+            this[row, col] = 0
+            if (solveCount() != 1) {
+                this[row, col] = value
+            } else {
+                removed++
+            }
         }
-        return null
+        return removed
     }
 
     override fun copy(): SudokuGrid = V6SudokuGridBetterRandomSelection().also { it.setCells(cells.copy()) }

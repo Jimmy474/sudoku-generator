@@ -120,14 +120,9 @@ fun test(config: Config) {
                         var removed = 0
 
                         val (time, peakMemoryBytes) = measureMemoryAndTime {
-                            generatedGrid = generator.generateRandom(
-                                version,
-                                config.grid
-                            )?.also {
+                            generatedGrid = generator.generateRandom(version, config.grid)?.also {
                                 removed = it.playable(difficulty)
-                            } ?: throw IllegalStateException(
-                                "Failed to generate grid"
-                            )
+                            } ?: throw IllegalStateException("Failed to generate grid")
                         }
 
                         if (removed < difficulty) {
@@ -141,7 +136,7 @@ fun test(config: Config) {
                             gridString,
                             difficulty,
                             gridString.count { it == '.' },
-                            time.toFloat(),
+                            time.toFloat() / 1000000,
                             peakMemoryBytes
                         )
 
@@ -176,15 +171,15 @@ fun test(config: Config) {
 
 fun makePlot(config: Config, df: DataFrame<BenchmarkResult>) {
     val aggregatedDf = df.filter {
-        (config.version == null || it.version in config.version) && (config.difficulty == null || it.difficulty in config.difficulty)
-    }.groupBy("version", "difficulty").aggregate {
+        (config.version == null || it.version in config.version) && (config.difficulty == null || it.actualDifficulty in config.difficulty)
+    }.groupBy("version", "actualDifficulty").aggregate {
         meanOf { runtimeMs } into "avgRuntimeMs"
         meanOf { peakMemUsage } into "avgMemoryUsage"
     }
 
     val runtimePlot = aggregatedDf.groupBy("version").plot {
         line {
-            x(difficulty)
+            x(actualDifficulty)
             y(avgRuntimeMs)
             color(version) {
                 legend.name = "Code Version"
@@ -200,7 +195,7 @@ fun makePlot(config: Config, df: DataFrame<BenchmarkResult>) {
 
     val memoryPlot = aggregatedDf.groupBy("version").plot {
         line {
-            x(difficulty)
+            x(actualDifficulty)
             y(avgMemoryUsage / 1024)
             color(version) {
                 legend.name = "Code Version"
