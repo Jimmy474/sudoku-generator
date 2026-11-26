@@ -3,6 +3,7 @@ plugins {
     kotlin("plugin.dataframe") version "2.4.21"
     kotlin("plugin.serialization") version "2.4.21"
     id("com.gradleup.shadow") version "9.6.1"
+    id("me.champeau.jmh") version "0.7.3"
     application
 }
 
@@ -23,6 +24,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-hocon:1.11.0")
     testImplementation(kotlin("test"))
+    jmh("org.openjdk.jol:jol-core:0.17")
 }
 
 kotlin {
@@ -37,4 +39,30 @@ tasks.jar {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+jmh {
+    jmhVersion.set("1.37")
+    resultFormat.set("JSON")
+    threads.set(1)
+    jvmArgsAppend.set(listOf("-Djdk.attach.allowAttachSelf=true"))
+
+    if (providers.gradleProperty("retainedOnly").isPresent) {
+        includes.set(listOf(".*SudokuRetainedMemoryBenchmark.measureRetainedGraph"))
+        resultsFile.set(layout.buildDirectory.file("results/jmh/retained.json"))
+    } else if (providers.gradleProperty("allocationSmoke").isPresent) {
+        resultsFile.set(layout.buildDirectory.file("results/jmh/smoke.json"))
+        benchmarkParameters.put(
+            "versionNumber",
+            objects.listProperty(String::class.java).value(listOf("1"))
+        )
+        benchmarkParameters.put(
+            "difficulty",
+            objects.listProperty(String::class.java).value(listOf("10"))
+        )
+        fork.set(1)
+        warmupIterations.set(0)
+        iterations.set(1)
+        timeOnIteration.set("100ms")
+    }
 }

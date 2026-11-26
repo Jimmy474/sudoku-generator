@@ -8,10 +8,10 @@ A high-performance Sudoku generator, solver, benchmarking suite, and performance
 
 - **Unique Puzzle Generation:** Generates valid, uniquely solvable Sudoku puzzles at configurable difficulty levels (0–64 removed cells).
 - **Progressive Optimization Journey:** Implements 6 distinct solver and grid data representations (`V1` through `V6`) to compare performance gains.
-- **Accurate Profiling:** Measures execution duration (nanoseconds/milliseconds) and peak allocated heap memory per thread via `ThreadMXBean`.
+- **Allocation Benchmarking:** Includes an isolated JMH benchmark for allocated bytes per puzzle-reduction operation (B/op).
 - **Interactive Multi-Level Progress Bar:** Real-time ANSI-rendered terminal progress bars for version, difficulty, and iteration tracking.
 - **Data Analysis & Export:** Writes structured benchmark metrics to CSV using `kotlinx.dataframe`.
-- **Automated Plotting:** Visualizes execution time and peak memory curves as SVG plots using `kandy-lets-plot`.
+- **Automated Plotting:** Visualizes existing benchmark CSV data as SVG plots using `kandy-lets-plot`. The legacy memory series is an allocation-counter delta, not peak memory.
 
 ---
 
@@ -43,6 +43,38 @@ The compiled archive is generated at `build/libs/sudoku-generator-1.0-SNAPSHOT.j
 ./gradlew shadowJar
 ```
 The packaged fat JAR containing all runtime dependencies is generated at `build/libs/sudoku-generator-1.0-SNAPSHOT-all.jar`.
+
+### Memory Analysis Benchmarks
+
+The JMH benchmarks compare `playable()` across versions 1–6 using the same completed Sudoku grid and difficulty targets 40, 50, 57, and 60.
+
+- The allocation benchmark measures allocated bytes per operation (B/op) and runtime inside `playable()`. Grid construction, loading, and seed setup are outside the measured method.
+- The retained-memory benchmark creates and reduces a fresh grid before sampling its reachable object graph with JOL. The graph measurement is excluded from the benchmark's reported operation time and includes retained grid state such as caches. It is an object-graph footprint estimate, not total process heap or peak heap.
+
+Run both benchmark sets:
+```powershell
+.\gradlew.bat jmh
+```
+
+JMH result data is written to `build/results/jmh/results.json`. Generate the combined CSV and HTML report:
+```powershell
+python tools\report_jmh.py
+```
+
+The report is written to `build/reports/jmh/memory-analysis-report.html` and `build/reports/jmh/memory-analysis-summary.csv`. The HTML includes allocation, reachable-memory, and runtime graphs plus a detailed table.
+
+To collect only retained-memory samples alongside an existing allocation result file:
+```powershell
+.\gradlew.bat jmh -PretainedOnly
+python tools\report_jmh.py --retained-input build\results\jmh\retained.json
+```
+The retained-only run writes `build/results/jmh/retained.json` and does not overwrite the standard JMH results.
+
+To run a quick smoke test for one version and difficulty without replacing the full results:
+```powershell
+.\gradlew.bat jmh -PallocationSmoke
+```
+The smoke result is saved separately to `build/results/jmh/smoke.json`. Python 3 is required for report generation; the script uses only the standard library and accepts optional `--input` and `--output-dir` arguments.
 
 ---
 
@@ -99,7 +131,7 @@ Time taken: 8 milliseconds
 
 ### 2. Benchmark Execution (`-test`)
 
-Runs automated benchmarks across grid implementations, iterations, and difficulties, collecting execution time and memory metrics into CSV files.
+Runs the legacy concurrent benchmarks across grid implementations, iterations, and difficulties, collecting timing and per-thread allocation-counter values into CSV files. These measurements are separate from the isolated JMH B/op benchmark above.
 
 #### Examples:
 
@@ -119,8 +151,8 @@ Results are written as CSV files in the destination directory (default: `benchma
 - `grid`: 81-character puzzle string representation.
 - `difficulty`: Target number of removed cells.
 - `actualDifficulty`: Actual number of removed cells achieved while preserving uniqueness.
-- `runtimeMs`: Measured generation and solution validation time in milliseconds.
-- `peakMemUsage`: Allocated heap memory in bytes during execution.
+- `runtimeMs`: The legacy benchmark currently stores elapsed nanoseconds in this field despite the name.
+- `peakMemUsage`: The legacy benchmark's per-thread allocated-byte delta, not peak or retained memory. Concurrent tasks can contaminate this measurement.
 
 ---
 
@@ -134,8 +166,8 @@ Reads benchmark CSV files from `-path`, computes group aggregations (mean runtim
 ```
 
 #### Generated Plots:
-- `plots/runtime.svg`: Line plot showing **Runtime Duration (ms)** versus **Grid Difficulty Level** across optimization versions.
-- `plots/memory.svg`: Line plot showing **Peak Memory Usage (KB)** versus **Grid Difficulty Level** across optimization versions.
+- `plots/runtime.svg`: Line plot showing the legacy `runtimeMs` field versus **Grid Difficulty Level** across optimization versions; its values are currently nanoseconds.
+- `plots/memory.svg`: Line plot showing the legacy allocated-byte delta (displayed as KB) versus **Grid Difficulty Level** across optimization versions; it is not peak memory.
 
 ---
 
