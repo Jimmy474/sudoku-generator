@@ -50,6 +50,15 @@ jmh {
     if (providers.gradleProperty("retainedOnly").isPresent) {
         includes.set(listOf(".*SudokuRetainedMemoryBenchmark.measureRetainedGraph"))
         resultsFile.set(layout.buildDirectory.file("results/jmh/retained.json"))
+    } else if (providers.gradleProperty("peakSamples").isPresent) {
+        // Sampling check: same peak benchmark with a different number of samples per operation.
+        val samples = providers.gradleProperty("peakSamples").get().toInt()
+        includes.set(listOf(".*SudokuPeakLiveHeapBenchmark\\..*"))
+        jvmArgsAppend.set(listOf("-Djdk.attach.allowAttachSelf=true", "-Dpeak.samplesPerOp=$samples"))
+        resultsFile.set(layout.buildDirectory.file("results/jmh/peak-samples-$samples.json"))
+    } else if (providers.gradleProperty("peakOnly").isPresent) {
+        includes.set(listOf(".*SudokuPeakLiveHeapBenchmark\\..*"))
+        resultsFile.set(layout.buildDirectory.file("results/jmh/peak.json"))
     } else if (providers.gradleProperty("allocationSmoke").isPresent) {
         resultsFile.set(layout.buildDirectory.file("results/jmh/smoke.json"))
         benchmarkParameters.put(
