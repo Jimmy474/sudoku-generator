@@ -50,8 +50,12 @@ The JMH benchmarks compare `playable()` across versions 1–6 using the same com
 
 - The allocation benchmark measures allocated bytes per operation (B/op) and runtime inside `playable()`. Grid construction, loading, and seed setup are outside the measured method.
 - The retained-memory benchmark creates and reduces a fresh grid before sampling its reachable object graph with JOL. The graph measurement is excluded from the benchmark's reported operation time and includes retained grid state such as caches. It is an object-graph footprint estimate, not total process heap or peak heap.
+- The peak live heap benchmark (`SudokuPeakLiveHeapBenchmark`) reports the most memory the grid held at one time during `playable()`, including the grid itself and any cache, so it is comparable with retained memory. It runs in a forked JVM using the Serial collector with `-XX:MarkSweepDeadRatio=0 -XX:MarkSweepAlwaysCompactCount=1`, so every full GC compacts completely and the heap used after it is exactly the live heap. A sampler thread runs a full GC each time `playable()` has allocated a fixed number of bytes (about 500 samples per operation by default, at least every 8 KB). Value = grid size before the operation (JOL) + highest sample − live heap from a full GC just before the operation − harness noise.
+  - Harness noise is measured by `harnessNoise`, a control method that does every measurement step except calling `playable()`.
+  - An operation is discarded if the heap's growth from baseline to end differs from the grid's own growth (JOL) by more than 1 KB, since something else in the JVM changed the heap during it.
+  - A high point between two samples can be missed (value too low). The sampling check below reruns with fewer samples to show whether the value has settled.
 
-Run both benchmark sets:
+Run all three benchmark sets:
 ```powershell
 .\gradlew.bat jmh
 ```
@@ -61,7 +65,7 @@ JMH result data is written to `build/results/jmh/results.json`. Generate the com
 python tools\report_jmh.py
 ```
 
-The report is written to `build/reports/jmh/memory-analysis-report.html` and `build/reports/jmh/memory-analysis-summary.csv`. The HTML includes allocation, reachable-memory, and runtime graphs plus a detailed table.
+The report is written to `build/reports/jmh/memory-analysis-report.html` and `build/reports/jmh/memory-analysis-summary.csv`. The HTML includes allocation, reachable-memory, peak live heap, and runtime graphs plus a detailed table.
 
 To collect only retained-memory samples alongside an existing allocation result file:
 ```powershell
@@ -69,6 +73,21 @@ To collect only retained-memory samples alongside an existing allocation result 
 python tools\report_jmh.py --retained-input build\results\jmh\retained.json
 ```
 The retained-only run writes `build/results/jmh/retained.json` and does not overwrite the standard JMH results.
+
+To collect only peak live heap samples alongside existing results:
+```powershell
+.\gradlew.bat jmh -PpeakOnly
+python tools\report_jmh.py --peak-input build\results\jmh\peak.json
+```
+The peak-only run writes `build/results/jmh/peak.json`. When `--peak-input` is given, peak results inside the main input file are ignored. The report needs allocation, retained-memory, and peak live heap results for the same version/difficulty cases.
+
+To add the peak sampling check (same benchmark with fewer samples per operation):
+```powershell
+.\gradlew.bat jmh -PpeakSamples=250
+.\gradlew.bat jmh -PpeakSamples=125
+python tools\report_jmh.py --peak-input build\results\jmh\peak.json --peak-convergence-input build\results\jmh\peak-samples-250.json build\results\jmh\peak-samples-125.json
+```
+Each run writes `build/results/jmh/peak-samples-<count>.json`.
 
 To run a quick smoke test for one version and difficulty without replacing the full results:
 ```powershell
